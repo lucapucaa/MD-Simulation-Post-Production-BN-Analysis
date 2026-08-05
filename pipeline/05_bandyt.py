@@ -64,24 +64,51 @@ def run_bandyt_analysis(run_id, restarts, bandyt_path="/home/lchill/work/dyrk1a-
     print(f"=== Running BaNDyT Bayesian Network Structure Learning on: {run_id} ===")
     df = pd.read_csv(input_csv)
     
-    # 📉 🚀 FIX 1: Downsample the trajectory frames by a stride of 100
+    # 📉 🚀 1000ns FIX: Set Stride to 100
     original_row_count = df.shape[0]
     df = df.iloc[::100].copy()
-    print(f"📉 Trajectory downsampled using a stride of 100: {original_row_count} frames -> {df.shape[0]} frames.")
+    print(f"📉 1000ns Trajectory downsampled using a stride of 100: {original_row_count} frames -> {df.shape[0]} frames.")
 
     # Drop the chronological frame index so it isn't treated as a physical variable
     if 'Frame' in df.columns:
         df = df.drop(columns=['Frame'])
+
+    # 🧬 🚀 TOPOLOGY FIX: Convert Pairwise Contacts into Individual Residue Nodes
+    print("🔄 Collapsing pairwise interaction energies into per-residue dynamic profiles...")
+    original_pairs = df.shape[1]
+    residue_df = pd.DataFrame(index=df.index)
+    
+    for col in df.columns:
+        # Look for the dash that separates the two residues in your Phase 4 output
+        if '-' in col:
+            res1, res2 = col.split('-', 1)
+            
+            # Accumulate energy for Residue 1
+            if res1 in residue_df:
+                residue_df[res1] += df[col]
+            else:
+                residue_df[res1] = df[col].copy()
+                
+            # Accumulate energy for Residue 2
+            if res2 in residue_df:
+                residue_df[res2] += df[col]
+            else:
+                residue_df[res2] = df[col].copy()
+        else:
+            residue_df[col] = df[col]
+            
+    df = residue_df.copy()
+    print(f"✅ Network restructured: {original_pairs} pairs collapsed into {df.shape[1]} unique individual residues.")
         
-    # 🧹 🚀 FIX 2: RAM SAVER - Drop pairs that barely fluctuate (Variance < 0.2)
-    print("🧹 Filtering out static noise and ultra-weak interactions to save RAM...")
+    # 🧹 RAM SAVER: Drop residues that are completely static (Variance < 0.2)
+    print("🧹 Filtering out rigidly static residues to isolate functional pathways...")
     initial_cols = df.shape[1]
     variances = df.var(numeric_only=True)
     active_cols = variances[variances > 0.2].index
     df = df[active_cols].copy()
     
-    print(f"Ingested dataset with {df.shape[1]} active residue columns (Dropped {initial_cols - df.shape[1]} noisy columns).")
-    print(f"📊 Final Matrix Size going into BaNDyT: {df.shape[0]} frames x {df.shape[1]} pairs")
+    print(f"Ingested dataset with {df.shape[1]} active residues (Dropped {initial_cols - df.shape[1]} static residues).")
+    print(f"📊 Final Matrix Size going into BaNDyT: {df.shape[0]} frames x {df.shape[1]} residues")
     
     # Serialize temporary downsampled CSV because BaNDyT ingests data via paths
     temp_csv = os.path.join(data_dir, f"temp_downsampled_{run_id}.csv")
