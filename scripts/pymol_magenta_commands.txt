@@ -1,0 +1,12 @@
+# ==================================================
+# PYMOL COMMANDS TO ISOLATE & COLOR CONTACT RESIDUES
+# Compiled from: ../data/ogxtc/dyrk1a_ATP_run_contacts.tsv
+# ==================================================
+
+select active_site_contacts, resi 134+135+136+165+166+167+168+169+170+173+186+188+203+222+238+239+240+241+242+244+287+289+291+292+294+306+307+310+321+324+325
+
+# Combine selection groups, apply magenta coloring, and show as sticks
+select active_site_contacts, contacts_chX
+color magenta, active_site_contacts
+show sticks, active_site_contacts
+deselect
