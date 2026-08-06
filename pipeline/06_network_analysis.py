@@ -71,17 +71,31 @@ def analyze_network_topology(run_id, pdb_file, mutations_csv=None):
     u = mda.Universe(pdb_file)
     all_protein_residues = []
     
+    # 🎯 TRANSLATOR DICTIONARY (Phase 5 pure numbers -> Phase 6 structural labels)
+    node_translator = {}
+    
     for res in u.residues:
         if res.resname not in ["SOL", "WAT", "HOH", "TIP3", "CL", "NA", "MG"]:
             chain = res.chainID if (hasattr(res, 'chainID') and res.chainID) else "A"
             node_name = f"{chain}:{res.resname}:{res.resnum}"
             all_protein_residues.append(node_name)
             
+            # Accommodates both pure numbers ('207') and AA labels ('LEU207') from Phase 4
+            node_translator[str(res.resnum)] = node_name
+            node_translator[f"{res.resname}{res.resnum}"] = node_name
+            node_translator[res.resname] = node_name
+            
     G.add_nodes_from(all_protein_residues)
     
     for _, row in df_edges.iterrows():
-        if row["Source"] in G and row["Target"] in G:
-            G.add_edge(row["Source"], row["Target"], weight=float(row["Weight"]))
+        raw_source = str(row["Source"])
+        raw_target = str(row["Target"])
+        
+        source_node = node_translator.get(raw_source, raw_source)
+        target_node = node_translator.get(raw_target, raw_target)
+        
+        if source_node in G and target_node in G:
+            G.add_edge(source_node, target_node, weight=float(row["Weight"]))
             
     print("Calculating native weighted degree metrics...")
     weighted_degree_dict = dict(G.degree(weight='weight'))
@@ -98,40 +112,38 @@ def analyze_network_topology(run_id, pdb_file, mutations_csv=None):
     # ==========================================================================
     # 🎨 VISUAL DESIGN CONFIGURATION
     # ==========================================================================
-    STRONG_PATHWAY_THRESHOLD = 0.40  
+    STRONG_PATHWAY_THRESHOLD = 0.70  
     
+    # Build a clean undirected layout graph containing ONLY connected edges
     G_layout = nx.Graph() 
-    G_layout.add_nodes_from(G.nodes())
-    
     for u_node, v_node, d in G.edges(data=True):
         G_layout.add_edge(u_node, v_node, weight=d.get("weight", 0.0))
             
-    active_nodes = [node for node, degree in G_layout.degree() if degree >= 2]
-    orbit_nodes = [node for node in G_layout.nodes() if node not in active_nodes]
+    # 🚀 FIX: Drop all isolated/orbit nodes completely. Only keep nodes with at least 1 connection.
+    connected_nodes = [node for node, degree in G_layout.degree() if degree >= 1]
+    G_layout = G_layout.subgraph(connected_nodes).copy()
     
-    pos = {}
-    if active_nodes:
-        G_active = G_layout.subgraph(active_nodes)
-        pos_active = nx.spring_layout(G_active, k=0.75, scale=2.2, iterations=150, seed=42, weight='weight')
-        pos.update(pos_active)
-        
+    # 🚀 FIX: Lock thresholds exactly to the Top 10% (90th percentile)
     hub_threshold = np.percentile(list(weighted_degree_dict.values()), 90) if weighted_degree_dict else 0.0
-    betweenness_threshold = np.percentile(list(betweenness_dict.values()), 95) if betweenness_dict else 0.0
+    betweenness_threshold = np.percentile(list(betweenness_dict.values()), 90) if betweenness_dict else 0.0
+    
+    # Generate the organic circular physics layout
+    pos = nx.spring_layout(G_layout, k=1.2, scale=2.5, iterations=200, seed=42, weight='weight')
         
-    print("Applying global dynamic-radius relaxation...")
+    print("Applying global dynamic-radius relaxation to prevent node overlap...")
     for _ in range(150):      
         moved = False
-        for node1 in active_nodes:
-            is_hub1 = weighted_degree_dict[node1] >= hub_threshold
+        for node1 in G_layout.nodes():
+            is_hub1 = weighted_degree_dict.get(node1, 0) >= hub_threshold
             parts1 = node1.split(":")
             resnum1 = parts1[2] if len(parts1) == 3 else ""
             is_mut1 = resnum1 in mutation_resnums
             r1 = 0.40 if (is_mut1 and is_hub1) else (0.25 if is_hub1 else 0.05)
             
-            for node2 in active_nodes:
+            for node2 in G_layout.nodes():
                 if node1 == node2:
                     continue
-                is_hub2 = weighted_degree_dict[node2] >= hub_threshold
+                is_hub2 = weighted_degree_dict.get(node2, 0) >= hub_threshold
                 parts2 = node2.split(":")
                 resnum2 = parts2[2] if len(parts2) == 3 else ""
                 is_mut2 = resnum2 in mutation_resnums
@@ -154,12 +166,6 @@ def analyze_network_topology(run_id, pdb_file, mutations_csv=None):
                     pos[node2][1] -= (dy / dist) * push
         if not moved:
             break  
-
-    if orbit_nodes:
-        r_orbit = 2.35  
-        for i, node in enumerate(orbit_nodes):
-            theta = 2.0 * np.pi * i / len(orbit_nodes)
-            pos[node] = np.array([r_orbit * np.cos(theta), r_orbit * np.sin(theta)])
             
     node_colors, node_sizes, node_edge_colors, node_lw = [], [], [], []
     red_mutation_nodes = set()
@@ -168,34 +174,32 @@ def analyze_network_topology(run_id, pdb_file, mutations_csv=None):
         parts = node.split(":")
         resnum = parts[2] if len(parts) == 3 else ""
         is_mutation = resnum in mutation_resnums
-        is_hub = weighted_degree_dict[node] >= hub_threshold
-        is_high_betweenness = betweenness_dict[node] >= betweenness_threshold
+        is_hub = weighted_degree_dict.get(node, 0) >= hub_threshold
+        is_high_betweenness = betweenness_dict.get(node, 0) >= betweenness_threshold
         
-        if is_high_betweenness and node in active_nodes:
+        # Allosteric Bridge Borders (Top 10% Betweenness)
+        if is_high_betweenness:
             node_edge_colors.append("#263238") 
             node_lw.append(1.5)
         else:
             node_edge_colors.append("#CFD8DC") 
             node_lw.append(0.4)
 
+        # Node Fill Colors & Sizes
         if is_mutation:
             if is_hub:
-                node_colors.append("#D32F2F")
+                node_colors.append("#D32F2F") # Red Hub
                 node_sizes.append(850)         
                 red_mutation_nodes.add(node)
             else:
-                node_colors.append("#FF9800")
+                node_colors.append("#FF9800") # Orange minor mutation
                 node_sizes.append(60)          
         else:
-            if node in active_nodes:
-                if is_hub:
-                    node_colors.append("#1565C0")
-                    node_sizes.append(600)         
-                else:
-                    node_colors.append("#B2DFDB")
-                    node_sizes.append(40)          
+            if is_hub:
+                node_colors.append("#1565C0") # Blue Hub
+                node_sizes.append(600)         
             else:
-                node_colors.append("#90A4AE")
+                node_colors.append("#90A4AE") # Standard node
                 node_sizes.append(45)          
 
     clean_labels = {}
@@ -203,7 +207,7 @@ def analyze_network_topology(run_id, pdb_file, mutations_csv=None):
         parts = n.split(":")
         resnum = parts[2] if len(parts) == 3 else ""
         is_mutation = resnum in mutation_resnums
-        is_hub = weighted_degree_dict[n] >= hub_threshold
+        is_hub = weighted_degree_dict.get(n, 0) >= hub_threshold
         
         if is_mutation and is_hub:
             clean_labels[n] = f"{parts[1]}-{parts[2]}" if len(parts) == 3 else n
@@ -226,17 +230,13 @@ def analyze_network_topology(run_id, pdb_file, mutations_csv=None):
                 background_edges.append((u_node, v_node))
 
     # ==========================================================================
-    # 🎨 COMPACT LEGEND MATRIX (LARGE FONT, SMALLER PADDING & ICONS)
+    # 🎨 COMPACT LEGEND MATRIX 
     # ==========================================================================
     legend_elements = [
         Line2D([0], [0], marker='o', color='w', label='Critical Hub + Disease Associated Mutation (Red)', markerfacecolor='#D32F2F', markeredgecolor='#D32F2F', markersize=10),
         Line2D([0], [0], marker='o', color='w', label='Critical Hub (Blue)', markerfacecolor='#1565C0', markeredgecolor='#1565C0', markersize=8),
         Line2D([0], [0], marker='o', color='w', label='Disease Associated Mutation (Orange)', markerfacecolor='#FF9800', markeredgecolor='#FF9800', markersize=5),
         Line2D([0], [0], marker='o', color='w', label='Allosteric Bridge Node (Charcoal Border)', markerfacecolor='none', markeredgecolor='#263238', markeredgewidth=1.5, markersize=8),
-        
-        # ⭕ HOLLOW INTEREST INDICATORS
-        Line2D([0], [0], marker='o', color='w', label='Allosteric Node of Interest', markerfacecolor='none', markeredgecolor='#D32F2F', markeredgewidth=1.5, markersize=8),
-        Line2D([0], [0], marker='o', color='w', label='Active Site Connected Node', markerfacecolor='none', markeredgecolor='#4CAF50', markeredgewidth=1.5, markersize=8),
         
         # 🔗 EDGE / PATHWAY CLASSIFICATIONS
         Line2D([0], [0], lw=1.8, color='#E91E63', label='Allosteric Communication Highway'),
@@ -249,15 +249,14 @@ def analyze_network_topology(run_id, pdb_file, mutations_csv=None):
         nx.draw_networkx_edges(G_layout, pos, edgelist=allosteric_highways, width=1.5, edge_color="#E91E63", alpha=0.95, arrows=True, arrowstyle="->", arrowsize=10, node_size=node_sizes)
         nx.draw_networkx_nodes(G_layout, pos, node_size=node_sizes, node_color=node_colors, edgecolors=node_edge_colors, linewidths=node_lw)
         
-        # Retains fontsize=20 but compresses padding and handle sizes
         plt.legend(
             handles=legend_elements, 
             loc='upper left', 
-            fontsize=20,          # Kept large typography
-            labelspacing=0.35,     # Tight vertical spacing between entries
-            handletextpad=0.5,     # Reduced space between icon and text label
-            handlelength=1.2,      # Shortened horizontal line icons
-            borderpad=0.5,         # Compact border margin around box
+            fontsize=20,          
+            labelspacing=0.35,     
+            handletextpad=0.5,     
+            handlelength=1.2,      
+            borderpad=0.5,         
             frameon=True, 
             facecolor='white', 
             edgecolor='#CFD8DC'

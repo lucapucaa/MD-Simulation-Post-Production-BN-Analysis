@@ -1,0 +1,79 @@
+#!/bin/bash
+set -e
+
+echo "=== Environment Setup ==="
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate dyrk1a
+
+# --- Configuration Variables ---
+DATA_DIR="../data"
+OUTPUT_DIR="../results/figures"
+PDB_IN="prot-lig.pdb"
+TRAJ_IN="final.xtc"
+NDX_TEMP="${DATA_DIR}/temp_analysis.ndx"  # Created dynamically
+
+# Assemble full paths cleanly
+PDB_PATH="${DATA_DIR}/${PDB_IN}"
+TRAJ_PATH="${DATA_DIR}/${TRAJ_IN}"
+
+# Safety Check: Ensure the output directory exists
+mkdir -p "${OUTPUT_DIR}"
+
+echo "=== Step 1: Dynamically Generating Index Groups ==="
+# This merges Group 1 (Protein) and Group 13 (ATP/Ligand) into a new group
+# 'q' saves and exits make_ndx. 
+# NOTE: If your ligand is a different group number than 13, change it below!
+echo -e "1 | 13\nq" | gmx make_ndx -f "$PDB_PATH" -o "$NDX_TEMP"
+
+# GROMACS automatically names this merged group something like "ch_1_ch_13" 
+# Let's quickly check what GROMACS named it or just use the default fallback group number.
+# To be completely safe and avoid naming guesswork, we can grab the last group by its index number.
+# In standard GROMACS, adding a group puts it at the end of the list.
+
+echo "=== Step 2: Running GROMACS Quality Controls ==="
+
+# 1. RMSD (Fit on Backbone, Calculate on Backbone)
+echo "Backbone Backbone" | gmx rms -s "$PDB_PATH" -f "$TRAJ_PATH" -n "$NDX_TEMP" -o "${DATA_DIR}/rmsd.xvg"
+
+# 2. RMSF (Calculate per-residue fluctuations on C-alpha atoms)
+echo "C-alpha" | gmx rmsf -s "$PDB_PATH" -f "$TRAJ_PATH" -n "$NDX_TEMP" -o "${DATA_DIR}/rmsf_per_res.xvg" -res
+
+# 3. Radius of Gyration 
+# We pass the name of the merged group. GROMACS defaults it to the two combined names, 
+# but if that behaves weirdly, you can just pass the index number of the new group (usually "14")
+echo "Protein_UNK" | gmx gyrate -s "$PDB_PATH" -f "$TRAJ_PATH" -n "$NDX_TEMP" -o "${DATA_DIR}/gyrate.xvg" 2>/dev/null || \
+echo "14" | gmx gyrate -s "$PDB_PATH" -f "$TRAJ_PATH" -n "$NDX_TEMP" -o "${DATA_DIR}/gyrate.xvg"
+
+
+echo "=== Step 3: Triggering Data Plotting Engine ==="
+
+# Plot RMSD
+python ../scripts/plotxvg.py \
+  -f "${DATA_DIR}/rmsd.xvg" \
+  -t "DYRK1A Trajectory Deviation (RMSD)" \
+  -x "Time (ns)" -y "RMSD (nm)" \
+  -l "Backbone Core" \
+  -o "${OUTPUT_DIR}/rmsd.png"
+
+# Plot RMSF
+python ../scripts/plotxvg.py \
+  -f "${DATA_DIR}/rmsf_per_res.xvg" \
+  -t "Per-Residue Root Mean Square Fluctuation (RMSF)" \
+  -x "Residue Number" -y "RMSF (nm)" \
+  -l "Local Loop Fluctuation" \
+  -o "${OUTPUT_DIR}/rmsf.png"
+
+# Plot Radius of Gyration
+python ../scripts/plotxvg.py \
+  -f "${DATA_DIR}/gyrate.xvg" \
+  -t "Directional Compactness (Radius of Gyration)" \
+  -x "Time (ns)" -y "Radius of Gyration (nm)" \
+  -l "Total Rg, Rg about X (Y-Z Plane), Rg about Y (X-Z Plane), Rg about Z (X-Y Plane)" \
+  -o "${OUTPUT_DIR}/radius_of_gyration.png"
+
+
+echo "=== Step 4: Cleaning Up Temporary Files ==="
+rm -f "$NDX_TEMP"
+
+echo "=== Phase 2 Pipeline Executed Successfully ==="
+conda deactivate
